@@ -1,0 +1,229 @@
+"""
+Unit tests for ml_pipeline.preprocess
+
+Covers:
+- clean_interactions (validation, clipping, filtering)
+- drop_duplicates_keep_latest
+- convert_watch_minutes_to_rating
+- build_*_layer functions (bronze → silver → gold)
+- compute_baseline_statistics & detect_drift
+"""
+
+import pytest
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import json
+from ml_pipeline.data_drift import (
+    clean_interactions,
+    drop_duplicates_keep_latest,
+    convert_watch_minutes_to_rating,
+    build_bronze_layer,
+    build_silver_layer,
+    build_gold_layer,
+    compute_baseline_statistics,
+    detect_drift,
+)
+
+
+# ============================================================
+# 1. clean_interactions — cleaning, deduplication, filtering
+# ============================================================
+
+def test_clean_interactions_basic(tmp_path):
+    """
+    Should:
+    - drop rows with missing user_id or movie_id
+    - clip ratings to [1,5]
+    - remove duplicates keeping latest timestamp
+    - produce quality report
+    """
+    raw_df = pd.DataFrame({
+        "user_id": [1, 1, 2, None],
+        "movie_id": [10, 10, 20, 30],
+        "rating": [6, 4, 3, 5],
+        "ts": [1, 2, 3, 4],
+    })
+    config = {"min_rating": 1, "max_rating": 5, "min_user_interactions": 1}
+
+    cleaned_df, report = clean_interactions(raw_df, config, report_quality=True)
+
+    # --- Assertions ---
+    assert isinstance(cleaned_df, pd.DataFrame)
+    assert isinstance(report, dict)
+    assert "data_retention_rate" in report
+
+    # Missing user_id dropped
+    assert not cleaned_df["user_id"].isna().any()
+    # Ratings clipped
+    assert cleaned_df["rating"].max() <= 5
+    # Duplicates removed (user 1 only once)
+    assert cleaned_df["user_id"].value_counts().loc[1] == 1
+    # Data retention reasonable
+    assert 0 < report["data_retention_rate"] <= 1
+
+
+def test_clean_interactions_user_filter():
+    """
+    Should remove users with too few interactions (< min_user_interactions)
+    """
+    df = pd.DataFrame({
+        "user_id": [1, 1, 2, 3],
+        "movie_id": [10, 11, 12, 13],
+        "rating": [3, 4, 5, 2],
+    })
+    config = {"min_user_interactions": 2}
+
+    cleaned_df, report = clean_interactions(df, config, report_quality=True)
+
+    # Only user 1 (2 interactions) should remain
+    assert cleaned_df["user_id"].nunique() == 1
+    assert all(cleaned_df["user_id"] == 1)
+    assert report["final_rows"] == len(cleaned_df)
+
+
+def test_clean_interactions_with_missing_values():
+    """
+    Should handle NaN and invalid ratings gracefully.
+    """
+    df = pd.DataFrame({
+        "user_id": [1, 2, np.nan, 4],
+        "movie_id": [10, np.nan, 12, 13],
+        "rating": ["bad", 3, 5, 2],
+    })
+    config = {"min_rating": 1, "max_rating": 5}
+    cleaned_df, report = clean_interactions(df, config, report_quality=True)
+
+    assert isinstance(report, dict)
+    assert "invalid_ratings_non_numeric" in report["data_quality_issues"]
+    assert not cleaned_df["user_id"].isna().any()
+    assert "summary_stats" in report
+
+
+def test_clean_interactions_no_report_flag():
+    """
+    If report_quality=False, should return DataFrame only.
+    """
+    df = pd.DataFrame({
+        "user_id": [1, 2],
+        "movie_id": [10, 11],
+        "rating": [5, 4],
+    })
+    result = clean_interactions(df, {}, report_quality=False)
+    assert isinstance(result, pd.DataFrame)
+
+
+# ============================================================
+# 2. drop_duplicates_keep_latest
+# ============================================================
+
+def test_drop_duplicates_keep_latest():
+    """
+    Keeps latest timestamp when duplicates exist.
+    """
+    df = pd.DataFrame({
+        "user_id": [1, 1, 1],
+        "movie_id": [10, 10, 10],
+        "ts": [1, 2, 3],
+    })
+
+    deduped = drop_duplicates_keep_latest(df, ["user_id", "movie_id"])
+    assert len(deduped) == 1
+    assert deduped.iloc[0]["ts"] == 3
+
+
+# ============================================================
+# 3. convert_watch_minutes_to_rating
+# ============================================================
+
+@pytest.mark.parametrize("minutes,expected", [
+    (0, 1),     # no watch
+    (3, 2),     # short
+    (15, 2),    # partial
+    (30, 3),    # half
+    (60, 4),    # most
+    (100, 5),   # full
+])
+def test_convert_watch_minutes_to_rating(minutes, expected):
+    assert convert_watch_minutes_to_rating(minutes) == expected
+
+
+# ============================================================
+# 4. build_bronze_layer
+# ============================================================
+
+def test_build_bronze_layer(tmp_path):
+    """
+    Should save a parquet file to output dir.
+    """
+    df = pd.DataFrame({"user_id": [1], "movie_id": [10], "rating": [5]})
+    build_bronze_layer(df, tmp_path)
+    file = tmp_path / "raw_events.parquet"
+    assert file.exists()
+    read_back = pd.read_parquet(file)
+    assert len(read_back) == len(df)
+
+
+# ============================================================
+# 5. build_silver_layer
+# ============================================================
+
+def test_build_silver_layer_empty(tmp_path):
+    """
+    When no bronze parquet files exist, should return empty DataFrames.
+    """
+    ratings_df, watch_df = build_silver_layer(tmp_path, tmp_path / "silver")
+    assert ratings_df.empty
+    assert watch_df.empty
+
+
+# ============================================================
+# 6. build_gold_layer
+# ============================================================
+
+def test_build_gold_layer_merge(tmp_path):
+    """
+    Should merge ratings + watch_minutes data correctly.
+    """
+    silver_dir = tmp_path / "silver"
+    silver_dir.mkdir()
+
+    ratings = pd.DataFrame({"user_id": [1], "movie_id": [10], "rating": [5]})
+    watch = pd.DataFrame({"user_id": [1], "movie_id": [10], "watch_minutes": [90]})
+    ratings.to_parquet(silver_dir / "ratings.parquet", index=False)
+    watch.to_parquet(silver_dir / "watch_minutes.parquet", index=False)
+
+    output_path = tmp_path / "gold/interactions.parquet"
+    df = build_gold_layer(silver_dir, output_path)
+
+    assert not df.empty
+    assert {"user_id", "movie_id", "rating", "watch_minutes"}.issubset(df.columns)
+    assert output_path.exists()
+
+
+# ============================================================
+# 7. Baseline statistics + Drift detection
+# ============================================================
+
+def test_compute_baseline_and_detect_drift(tmp_path):
+    """
+    Ensure compute_baseline_statistics + detect_drift run end-to-end.
+    """
+    df = pd.DataFrame({
+        "user_id": [1, 2, 3, 4],
+        "movie_id": [10, 11, 12, 13],
+        "rating": [3, 4, 3, 4],
+    })
+
+    baseline_path = tmp_path / "baseline.json"
+    baseline = compute_baseline_statistics(df, baseline_path)
+    assert baseline_path.exists()
+    assert "rating_stats" in baseline
+    assert "n_users" in baseline
+
+    # Run drift detection with identical data (no drift expected)
+    report = detect_drift(baseline, df)
+    assert isinstance(report, dict)
+    assert "drift_detected" in report
+    assert report["drift_detected"] is False
+    assert "rating_distribution" in report or "user_activity" in report

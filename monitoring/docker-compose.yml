@@ -1,0 +1,18 @@
+services:
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus_monitoring
+    network_mode: host
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana_monitoring
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin

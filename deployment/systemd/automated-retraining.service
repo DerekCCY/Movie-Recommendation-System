@@ -1,0 +1,30 @@
+[Unit]
+Description=Automated ML Model Retraining Service
+Documentation=https://github.com/cmu-seai/group-project-f25-the-real-reel-deal
+Wants=automated-retraining.timer
+After=network.target
+
+[Service]
+Type=oneshot
+User=jbhathen
+Group=jbhathen
+WorkingDirectory=/home/jbhathen/group-project-f25-the-real-reel-deal
+
+# Use virtual environment Python
+ExecStart=/home/jbhathen/group-project-f25-the-real-reel-deal/venv/bin/python3 /home/jbhathen/group-project-f25-the-real-reel-deal/scripts/automated_retraining.py
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ml-retraining
+
+# Resource limits (optional - adjust based on your needs)
+MemoryMax=4G
+CPUQuota=200%
+
+# Restart policy
+Restart=on-failure
+RestartSec=5min
+
+[Install]
+WantedBy=multi-user.target

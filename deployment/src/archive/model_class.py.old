@@ -1,0 +1,85 @@
+"""
+SVD Model class definition - copied from the training notebook
+"""
+
+import pandas as pd
+import numpy as np
+import time
+import pickle
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import svds
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+class ImprovedSVDRecommendationModel:
+    def __init__(self, n_factors=100, regularization=0.01):
+        self.n_factors = n_factors
+        self.regularization = regularization
+        self.user_factors = None
+        self.item_factors = None
+        self.global_mean = None
+        self.user_bias = None
+        self.item_bias = None
+        self.user_mapping = {}
+        self.item_mapping = {}
+        self.reverse_user_mapping = {}
+        self.reverse_item_mapping = {}
+        self.all_movie_ids = []
+        self.user_ids = []
+        self.popular_movies = []
+        self.n_users = 0
+        self.n_items = 0
+
+    def predict_rating(self, user_id, movie_id):
+        """Predict a single rating for user-movie pair"""
+        user_id, movie_id = str(user_id), str(movie_id)
+
+        if user_id not in self.user_mapping or movie_id not in self.item_mapping:
+            return self.global_mean
+
+        user_idx = self.user_mapping[user_id]
+        item_idx = self.item_mapping[movie_id]
+
+        # Prediction with bias terms
+        prediction = (np.dot(self.user_factors[user_idx], self.item_factors[item_idx]) +
+                     self.global_mean +
+                     self.user_bias[user_idx] +
+                     self.item_bias[item_idx])
+
+        # Clip to valid range
+        return np.clip(prediction, 1.0, 5.0)
+
+    def predict(self, user_id, n_recommendations=20):
+        """Generate movie recommendations for a user"""
+        user_id = str(user_id)
+
+        if user_id not in self.user_mapping:
+            return self.popular_movies[:n_recommendations]
+
+        try:
+            user_idx = self.user_mapping[user_id]
+
+            # Calculate scores for all items with bias
+            scores = (np.dot(self.item_factors, self.user_factors[user_idx]) +
+                     self.global_mean +
+                     self.user_bias[user_idx] +
+                     self.item_bias)
+
+            top_indices = np.argsort(scores)[::-1][:n_recommendations]
+            recommendations = [self.reverse_item_mapping[idx] for idx in top_indices]
+
+            return recommendations
+
+        except Exception as e:
+            print(f"Error in prediction for user {user_id}: {e}")
+            return self.popular_movies[:n_recommendations]
+
+    def get_model_info(self):
+        return {
+            'algorithm': 'Improved SVD with Bias Terms',
+            'n_factors': self.n_factors,
+            'regularization': self.regularization,
+            'total_movies': len(self.all_movie_ids),
+            'total_users': len(self.user_ids),
+            'matrix_size': f"{self.n_users}×{self.n_items}" if hasattr(self, 'n_users') else "Unknown"
+        }

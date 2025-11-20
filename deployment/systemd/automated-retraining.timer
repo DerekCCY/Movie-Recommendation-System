@@ -1,0 +1,20 @@
+[Unit]
+Description=Timer for automated ML model retraining (every 72 hours)
+Documentation=https://github.com/cmu-seai/group-project-f25-the-real-reel-deal
+Requires=automated-retraining.service
+
+[Timer]
+# First scheduled run at 1 AM on November 17, 2025
+OnCalendar=2025-11-17 01:00:00
+
+# Then run every 72 hours after each successful run
+OnUnitActiveSec=72h
+
+# Timing accuracy window (allows up to 5 minutes variance)
+AccuracySec=5min
+
+# Make timer persistent across reboots
+Persistent=true
+
+[Install]
+WantedBy=timers.target
